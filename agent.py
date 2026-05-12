@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.distributions as D
 import random
 from sudoku_generator import generate_puzzle
+import collections
 
 class SudokuAgent(nn.Module):
     def __init__(self, hidden=128):
@@ -36,41 +37,30 @@ def get_valid_mask(board, cell_idx):
 
     return mask
 
-def dynamic_difficulty(ep: int) -> int:
-    if ep < 5000:
-        return 60
-    elif ep < 10000:
-        return 50
-    elif ep < 15000:
-        return 40
-    elif ep <= 30000:
-        return 30
-    else:
-        return 15
-
-agent = SudokuAgent(hidden=128)
-opt = torch.optim.Adam(agent.parameters(), lr=1e-3)
+agent = SudokuAgent(hidden=512)
+opt = torch.optim.Adam(agent.parameters(), lr=0.0003)
 gamma = 0.99
 
 baseline = 0.0
 alpha_bl = 0.1
 
 try:
-    for ep in range(30000):
-        clues = dynamic_difficulty(ep)
+    clues = 60
+    success_window = collections.deque(maxlen=100)
+
+    ep = 0
+    while True:
         puzzle, solution = generate_puzzle(clues)
         board = puzzle.copy()
         log_probs, rewards = [], []
 
         while True:
             empties = [i for i, v in enumerate(board) if v == 0]
-            if not empties:
-                break
+            if not empties: break
 
             cell = random.choice(empties)
             mask = get_valid_mask(board, cell)
-            if not mask.any():
-                break
+            if not mask.any(): break
 
             state = torch.tensor(board, dtype=torch.float32).unsqueeze(0) / 9.0
             logits = agent(state).squeeze(0)
@@ -83,7 +73,6 @@ try:
 
             log_probs.append(dist.log_prob(action))
             board[cell] = action.item() + 1
-
             step_reward = 1.0 if board[cell] == solution[cell] else -1.0
             rewards.append(step_reward)
 
@@ -93,6 +82,14 @@ try:
         else:
             rewards[-1] -= 10.0
 
+        success_window.append(solved)
+        success_rate = sum(success_window) / len(success_window)
+
+        if success_rate > 0.80 and clues > 12:
+            clues -= 1
+        elif success_rate < 0.30 and clues < 60:
+            clues += 1
+
         returns = []
         G = 0
         for r in reversed(rewards):
@@ -100,18 +97,20 @@ try:
             returns.insert(0, G)
 
         returns = torch.tensor(returns, dtype=torch.float32)
-        baseline = (1 - alpha_bl) * baseline + alpha_bl * returns.mean().item()
+        episode_return = returns[0].item()  # G с первого шага = return эпизода
+        baseline = (1 - alpha_bl) * baseline + alpha_bl * episode_return
         advantages = returns - baseline
 
         loss = -(torch.stack(log_probs) * advantages).sum()
-
         opt.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(agent.parameters(), 1.0)
         opt.step()
 
-        if ep % 100 == 0:
-            print(f"Ep {ep:4d} | Ret: {returns.sum().item():6.1f} | Solved: {'✅' if solved else '❌'}")
+        if ep % 50 == 0:
+            print(f"Ep {ep:5d} | Ret: {episode_return:6.1f} | WinRate: {success_rate:.2%} | Clues: {clues:2d} | {'✅' if solved else '❌'}")
+
+        ep+=1
 except KeyboardInterrupt:
     print("Keyboard Interrupted.")
 finally:
