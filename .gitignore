@@ -1,4 +1,5 @@
 .venv/
 __pycache__/
 .idea/
-ultimate_sudoku.pth
+sudokuro.pth
+models/

@@ -1,117 +1,20 @@
-import torch
 import torch.nn as nn
-import torch.distributions as D
-import random
-from sudoku_generator import generate_puzzle
-import collections
 
 class SudokuAgent(nn.Module):
-    def __init__(self, hidden=128):
+    def __init__(self, hidden=256):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(81, hidden), nn.LayerNorm(hidden), nn.ReLU(),
-            nn.Linear(hidden, hidden), nn.LayerNorm(hidden), nn.ReLU(),
-            nn.Linear(hidden, 9)
+            nn.Linear(81, hidden),
+            nn.LayerNorm(hidden),
+            nn.ReLU(),
+
+            nn.Linear(hidden, hidden),
+            nn.LayerNorm(hidden),
+            nn.ReLU(),
+
+            nn.Linear(hidden, 81 * 9)
         )
 
     def forward(self, state):
-        return self.net(state)
-
-def get_valid_mask(board, cell_idx):
-    row, col = divmod(cell_idx, 9)
-    box_r, box_c = 3 * (row // 3), 3 * (col // 3)
-    mask = torch.ones(9, dtype=torch.bool)
-
-    for c in range(9):
-        val = board[row * 9 + c]
-        if val > 0: mask[val - 1] = False
-
-    for r in range(9):
-        val = board[r * 9 + col]
-        if val > 0: mask[val - 1] = False
-
-    for r in range(box_r, box_r + 3):
-        for c in range(box_c, box_c + 3):
-            val = board[r * 9 + c]
-            if val > 0: mask[val - 1] = False
-
-    return mask
-
-agent = SudokuAgent(hidden=512)
-opt = torch.optim.Adam(agent.parameters(), lr=0.0003)
-gamma = 0.99
-
-baseline = 0.0
-alpha_bl = 0.1
-
-try:
-    clues = 60
-    success_window = collections.deque(maxlen=100)
-
-    ep = 0
-    while True:
-        puzzle, solution = generate_puzzle(clues)
-        board = puzzle.copy()
-        log_probs, rewards = [], []
-
-        while True:
-            empties = [i for i, v in enumerate(board) if v == 0]
-            if not empties: break
-
-            cell = random.choice(empties)
-            mask = get_valid_mask(board, cell)
-            if not mask.any(): break
-
-            state = torch.tensor(board, dtype=torch.float32).unsqueeze(0) / 9.0
-            logits = agent(state).squeeze(0)
-
-            masked_logits = logits.clone()
-            masked_logits[~mask] = -1e9
-
-            dist = D.Categorical(logits=masked_logits)
-            action = dist.sample()
-
-            log_probs.append(dist.log_prob(action))
-            board[cell] = action.item() + 1
-            step_reward = 1.0 if board[cell] == solution[cell] else -1.0
-            rewards.append(step_reward)
-
-        solved = (board == solution)
-        if solved:
-            rewards[-1] += 20.0
-        else:
-            rewards[-1] -= 10.0
-
-        success_window.append(solved)
-        success_rate = sum(success_window) / len(success_window)
-
-        if success_rate > 0.80 and clues > 12:
-            clues -= 1
-        elif success_rate < 0.30 and clues < 60:
-            clues += 1
-
-        returns = []
-        G = 0
-        for r in reversed(rewards):
-            G = r + gamma * G
-            returns.insert(0, G)
-
-        returns = torch.tensor(returns, dtype=torch.float32)
-        episode_return = returns[0].item()  # G с первого шага = return эпизода
-        baseline = (1 - alpha_bl) * baseline + alpha_bl * episode_return
-        advantages = returns - baseline
-
-        loss = -(torch.stack(log_probs) * advantages).sum()
-        opt.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(agent.parameters(), 1.0)
-        opt.step()
-
-        if ep % 50 == 0:
-            print(f"Ep {ep:5d} | Ret: {episode_return:6.1f} | WinRate: {success_rate:.2%} | Clues: {clues:2d} | {'✅' if solved else '❌'}")
-
-        ep+=1
-except KeyboardInterrupt:
-    print("Keyboard Interrupted.")
-finally:
-    torch.save(agent.state_dict(), "ultimate_sudoku.pth")
+        x = self.net(state)
+        return x.view(-1, 81, 9)
